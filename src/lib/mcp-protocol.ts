@@ -275,7 +275,8 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
       return jsonRpcResult(id, {});
     case "tools/list":
       return jsonRpcResult(id, {
-        tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL],
+        tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL,
+  GET_APP_USAGE_TOOL,],
       });
     case "tools/call": {
       const name = typeof params.name === "string" ? params.name : "";
