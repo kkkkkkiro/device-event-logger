@@ -244,6 +244,52 @@ async function callListEventTypesTool(sql: postgres.Sql) {
   }
 }
 
+async function callGetAppUsageTool(
+  args: Record,
+  sql: postgres.Sql,
+  offsetMinutes: number,
+) {
+  const parsed = parseAppUsageToolArgs(args);
+
+  if (typeof parsed === "string") {
+    return {
+      content: [{ type: "text", text: parsed }],
+      isError: true,
+    };
+  }
+
+  try {
+    const result = await queryAppUsage(
+      parsed,
+      sql,
+      offsetMinutes,
+    );
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: buildAppUsageSummaryText(result),
+        },
+      ],
+      structuredContent: result,
+      isError: false,
+    };
+  } catch (error) {
+    console.error("MCP get_app_usage failed:", error);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Database error while calculating app usage.",
+        },
+      ],
+      isError: true,
+    };
+  }
+}
+
 async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offsetMinutes: number) {
   const id = (message.id ?? null) as JsonRpcId;
   const method = typeof message.method === "string" ? message.method : "";
@@ -283,6 +329,18 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
       if (name === LIST_EVENT_TYPES_TOOL.name) {
         return jsonRpcResult(id, await callListEventTypesTool(sql));
       }
+      if (name === GET_APP_USAGE_TOOL.name) {
+  const args =
+    params.arguments && typeof params.arguments === "object"
+      ? params.arguments as Record
+      : {};
+
+  return jsonRpcResult(
+    id,
+    await callGetAppUsageTool(args, sql, offsetMinutes),
+  );
+}
+
       if (name !== QUERY_EVENTS_TOOL.name) {
         return jsonRpcError(id, -32601, `Unknown tool: ${name || "(empty)"}`);
       }
