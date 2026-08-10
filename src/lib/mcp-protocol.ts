@@ -296,3 +296,241 @@ export async function handleMcpPost(c: Context<{ Bindings: Env; Variables: Vars 
   c.header("MCP-Protocol-Version", protocolVersion);
   return c.json(response);
 }
+export type AppUsageQuery = {
+  since: Date;
+  until: Date;
+  value?: string;
+  maxSessionMinutes: number;
+};
+
+export type AppUsageItem = {
+  app: string;
+  durationSeconds: number;
+  opens: number;
+};
+
+export type AppUsageResult = {
+  since: string;
+  until: string;
+  totalSeconds: number;
+  apps: AppUsageItem[];
+};
+
+export function parseAppUsageToolArgs(
+  args: Record,
+): AppUsageQuery | string {
+  const rawHours = args.hours;
+  const rawSince = args.since;
+  const rawUntil = args.until;
+  const rawValue = args.value;
+  const rawMaxSessionMinutes = args.maxSessionMinutes;
+
+  let since: Date;
+
+  if (rawHours != null && rawHours !== "") {
+    const hours = Number(rawHours);
+
+    if (!Number.isFinite(hours) || hours <= 0) {
+      return "Invalid 'hours'";
+    }
+
+    since = new Date(Date.now() - hours * 3_600_000);
+  } else if (rawSince != null && String(rawSince).trim()) {
+    since = new Date(String(rawSince));
+
+    if (Number.isNaN(since.getTime())) {
+      return "Invalid 'since' format";
+    }
+  } else {
+    since = new Date(Date.now() - 6 * 3_600_000);
+  }
+
+  const until =
+    rawUntil != null && String(rawUntil).trim()
+      ? new Date(String(rawUntil))
+      : new Date();
+
+  if (Number.isNaN(until.getTime())) {
+    return "Invalid 'until' format";
+  }
+
+  if (until.getTime() < since.getTime()) {
+    return "'until' must be greater than or equal to 'since'";
+  }
+
+  const maxSessionMinutes =
+    rawMaxSessionMinutes == null || rawMaxSessionMinutes === ""
+      ? 30
+      : Number(rawMaxSessionMinutes);
+
+  if (
+    !Number.isFinite(maxSessionMinutes) ||
+    maxSessionMinutes <= 0 ||
+    maxSessionMinutes > 1440
+  ) {
+    return "Invalid 'maxSessionMinutes'";
+  }
+
+  const value =
+    rawValue == null || String(rawValue).trim() === ""
+      ? undefined
+      : String(rawValue);
+
+  return {
+    since,
+    until,
+    value,
+    maxSessionMinutes,
+  };
+}
+
+export async function queryAppUsage(
+  query: AppUsageQuery,
+  sql: postgres.Sql,
+  offsetMinutes: number,
+): Promise<AppUsageResult> {
+  const rows = await withRetry(() =>
+    sql.unsafe(
+      `
+        SELECT id, type, value, ts
+        FROM events
+        WHERE ts >= $1
+          AND ts <= $2
+          AND type IN ('app.open', 'app.close')
+          AND value IS NOT NULL
+        ORDER BY ts ASC, id ASC
+      `,
+      [query.since.toISOString(), query.until.toISOString()],
+    )
+  );
+
+  const usage = new Map<
+    string,
+    { durationSeconds: number; opens: number }
+  >();
+
+  let activeApp: string | null = null;
+  let activeSince: number | null = null;
+  const maxSessionMs = query.maxSessionMinutes * 60_000;
+
+  function ensureApp(app: string) {
+    let item = usage.get(app);
+
+    if (!item) {
+      item = {
+        durationSeconds: 0,
+        opens: 0,
+      };
+
+      usage.set(app, item);
+    }
+
+    return item;
+  }
+
+  function finishSession(endMs: number) {
+    if (activeApp == null || activeSince == null) return;
+
+    const durationMs = Math.max(
+      0,
+      Math.min(endMs - activeSince, maxSessionMs),
+    );
+
+    ensureApp(activeApp).durationSeconds += Math.round(
+      durationMs / 1000,
+    );
+
+    activeApp = null;
+    activeSince = null;
+  }
+
+  for (const row of rows) {
+    const type = String(row.type ?? "");
+    const app = row.value == null ? "" : String(row.value);
+    const timestamp = new Date(String(row.ts)).getTime();
+
+    if (!app || Number.isNaN(timestamp)) continue;
+
+    if (type === "app.open") {
+      // 打开任何新 App，都视为上一个前台 App 已结束。
+      finishSession(timestamp);
+
+      const item = ensureApp(app);
+      item.opens += 1;
+
+      activeApp = app;
+      activeSince = timestamp;
+      continue;
+    }
+
+    if (
+      type === "app.close" &&
+      activeApp === app &&
+      activeSince != null
+    ) {
+      finishSession(timestamp);
+    }
+  }
+
+  finishSession(query.until.getTime());
+
+  let apps = Array.from(usage.entries()).map(([app, item]) => ({
+    app,
+    durationSeconds: item.durationSeconds,
+    opens: item.opens,
+  }));
+
+  if (query.value) {
+    apps = apps.filter((item) => item.app === query.value);
+  }
+
+  apps.sort(
+    (a, b) =>
+      b.durationSeconds - a.durationSeconds ||
+      b.opens - a.opens ||
+      a.app.localeCompare(b.app),
+  );
+
+  return {
+    since: formatWithOffset(query.since, offsetMinutes),
+    until: formatWithOffset(query.until, offsetMinutes),
+    totalSeconds: apps.reduce(
+      (sum, item) => sum + item.durationSeconds,
+      0,
+    ),
+    apps,
+  };
+}
+
+export function buildAppUsageSummaryText(
+  result: AppUsageResult,
+): string {
+  if (!result.apps.length) {
+    return "No app usage found in this time range.";
+  }
+
+  const formatDuration = (totalSeconds: number) => {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${seconds}s`;
+    }
+
+    if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    }
+
+    return `${seconds}s`;
+  };
+
+  return [
+    `Estimated total app usage: ${formatDuration(result.totalSeconds)}.`,
+    ...result.apps.map(
+      (item) =>
+        `- ${item.app}: ${formatDuration(item.durationSeconds)} (${item.opens} open(s))`,
+    ),
+  ].join("\n");
+}
+
