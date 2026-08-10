@@ -114,6 +114,70 @@ const LIST_EVENT_TYPES_TOOL = {
     required: ["types"],
   },
 };
+const GET_APP_USAGE_TOOL = {
+  name: "get_app_usage",
+  title: "Get App Usage",
+  description:
+    "Estimate app usage duration and open counts from app.open and app.close events.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      hours: {
+        type: "number",
+        description:
+          "Look back N hours. Defaults to 6 when since is omitted.",
+        minimum: 0.001,
+      },
+      since: {
+        type: "string",
+        description:
+          "Start time in ISO 8601 format. Overrides the default hours window.",
+      },
+      until: {
+        type: "string",
+        description:
+          "End time in ISO 8601 format. Defaults to now.",
+      },
+      value: {
+        type: "string",
+        description:
+          "Optional exact app name filter, for example 抖音 or kelivo.",
+      },
+      maxSessionMinutes: {
+        type: "number",
+        description:
+          "Maximum duration counted for one session. Defaults to 30 minutes.",
+        minimum: 0.001,
+        maximum: 1440,
+      },
+    },
+  },
+  outputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      since: { type: "string" },
+      until: { type: "string" },
+      totalSeconds: { type: "integer" },
+      apps: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            app: { type: "string" },
+            durationSeconds: { type: "integer" },
+            opens: { type: "integer" },
+          },
+          required: ["app", "durationSeconds", "opens"],
+        },
+      },
+    },
+    required: ["since", "until", "totalSeconds", "apps"],
+  },
+};
+
 
 function jsonRpcError(id: JsonRpcId, code: number, message: string, data?: unknown) {
   return {
